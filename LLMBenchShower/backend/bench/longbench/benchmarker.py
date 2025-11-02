@@ -1,0 +1,3 @@
+from ..benchbase import BaseBench
+
+class LongBenchBenchmarker(BaseBench): ...

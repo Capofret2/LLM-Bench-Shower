@@ -1,0 +1,6 @@
+datasets ~= 4.0.0
+flask ~= 3.1.2
+torch ~= 2.7.0
+transformers ~= 4.51.0
+
+# TODO: other dependencies needed are TBA. 
