@@ -1,7 +1,7 @@
+import atexit
 import gc
 import torch
 import threading
-import time
 import queue
 from collections import defaultdict
 from typing import Dict, Tuple, List, Any, NamedTuple, Set
@@ -46,6 +46,8 @@ class LLMBenchRunner:
 
         self.input_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
         self.output_queue: queue.Queue[BenchResponse] = queue.Queue()
+
+        self._closed = False
 
         # Start background write-back thread
         self._stop_writeback = threading.Event()
@@ -360,6 +362,11 @@ class LLMBenchRunner:
 
     def close(self):
         """Clean up resources and flush all pending writes."""
+        if self._closed:
+            return  # Already closed, avoid double cleanup
+
+        self._closed = True
+
         # Stop the consumer thread
         self._stop_consumer.set()
         if self._consumer_thread.is_alive():
@@ -376,9 +383,27 @@ class LLMBenchRunner:
         if self.use_model_cache:
             self.model_cache.clear_cache()
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception as e:
+            print(f"Warning: Error during LLMBenchRunner cleanup: {e}")
+
 
 def get_llm_bench_runner():
     global _LLM_BENCHMARKER_RUNNER
     if _LLM_BENCHMARKER_RUNNER is None:
         _LLM_BENCHMARKER_RUNNER = LLMBenchRunner()
     return _LLM_BENCHMARKER_RUNNER
+
+
+def _cleanup_global_runner():
+    global _LLM_BENCHMARKER_RUNNER
+    if _LLM_BENCHMARKER_RUNNER is not None:
+        try:
+            _LLM_BENCHMARKER_RUNNER.close()
+        except Exception as e:
+            print(f"Warning: Error closing global LLMBenchRunner: {e}")
+
+
+atexit.register(_cleanup_global_runner)
