@@ -58,6 +58,8 @@ class LLMBenchRunner:
         self,
         model_name_or_path: str,
         dataset_name: str,
+        *args,
+        **kwargs,
     ) -> Dict:
         if (model_name_or_path, dataset_name) in self.bench_history:
             return self.bench_history[(model_name_or_path, dataset_name)]
@@ -72,6 +74,8 @@ class LLMBenchRunner:
             model=model,
             tokenizer=tokenizer,
             subdataset_name=subdataset_name,
+            *args,
+            **kwargs,
         )
         self.bench_history[(model_name_or_path, dataset_name)] = benchmark_results
 
@@ -86,6 +90,8 @@ class LLMBenchRunner:
         self,
         model_name_or_path: str,
         dataset_name: str,
+        *args,
+        **kwargs,
     ) -> Dict:
         if (model_name_or_path, dataset_name) in self.bench_history:
             return self.bench_history[(model_name_or_path, dataset_name)]
@@ -98,6 +104,8 @@ class LLMBenchRunner:
             model=model,
             tokenizer=tokenizer,
             subdataset_name=subdataset_name,
+            *args,
+            **kwargs,
         )
         self.bench_history[(model_name_or_path, dataset_name)] = benchmark_results
         return benchmark_results
