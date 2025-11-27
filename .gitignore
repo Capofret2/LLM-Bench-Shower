@@ -34,3 +34,4 @@ ENV/
 *.sublime-workspace
 *.sublime-project
 
+.ref/
