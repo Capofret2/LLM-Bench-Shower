@@ -12,6 +12,8 @@ class MockTokenizer:
         self.max_length = max_length
         self.eos_token_id = 2
         self.pad_token_id = 0
+        self.pad_token = "<pad>"  # 添加pad_token属性
+        self.eos_token = "<eos>"  # 添加eos_token属性
         
     def __call__(self, text: str, return_tensors: str = None, truncation: bool = False, max_length: int = None, **kwargs):
         """Tokenize text and return mock tensor-like object."""
@@ -51,6 +53,19 @@ class MockTokenizer:
         num_words = min(response_length // 5, 50)
         response = ' '.join(random.choices(words, k=num_words))
         return response
+    
+    def encode(self, text: str, **kwargs) -> list:
+        """Encode text to token ids."""
+        # Simulate encoding by returning a list of token ids
+        max_len = kwargs.get('max_length', self.max_length)
+        truncation = kwargs.get('truncation', False)
+        
+        if truncation and len(text) > max_len:
+            text = text[:max_len]
+        
+        # Create mock token ids (simplified version)
+        token_ids = [1] * min(len(text) // 10, 100) + [2]
+        return token_ids
 
 
 class MockTensor:
