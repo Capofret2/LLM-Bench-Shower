@@ -26,7 +26,7 @@ class MR_GMS8KBenchmarker(BaseBench):
         self.dataset_name = "MR-GMS8K"
         
     def _load_dataset(self, subdataset_name: str = "MR-GMS8K") -> List[Dict]:
-        """Load the MR-GMS8K dataset.
+        """Load the MR-GMS8K dataset, with fallback options.
         
         Args:
             subdataset_name: Name of the sub-dataset to load.
@@ -34,16 +34,44 @@ class MR_GMS8KBenchmarker(BaseBench):
         Returns:
             List of examples from the dataset.
         """
-        # 构建数据集文件路径 - 支持子目录结构，与测试数据创建逻辑保持一致
-        dataset_file = os.path.join(self.dataset_path, subdataset_name, f"{subdataset_name}.json")
+        # 优先尝试从测试数据路径加载
+        # 从 benchmarker.py 回到项目根目录: backend/bench/mr_gms8k -> backend/bench -> backend -> LLMBenchShower -> 项目根
+        test_data_base = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "tests", "test_data")
         
-        # 如果直接路径不存在，尝试直接在dataset_path下查找
-        if not os.path.exists(dataset_file):
-            dataset_file = os.path.join(self.dataset_path, f"{subdataset_name}.json")
+        # 注意：用户提供的路径是 MR-GSM8K（不是 MR-GMS8K）
+        local_paths = [
+            # 测试数据路径：tests/test_data/MR-GSM8K/dataset/MR-GSM8K.json
+            os.path.join(test_data_base, "MR-GSM8K", "dataset", "MR-GSM8K.json"),
+            # 生产数据路径：/root/share/datasets/MR-GMS8K/MR-GSM8K/dataset/MR-GSM8K.json
+            os.path.join(self.dataset_path, "MR-GSM8K", "dataset", "MR-GSM8K.json"),
+            # 备选：/root/share/datasets/MR-GMS8K/MR-GMS8K/dataset/MR-GMS8K.json
+            os.path.join(self.dataset_path, "MR-GMS8K", "dataset", "MR-GMS8K.json"),
+            # 旧路径：dataset_path/{subdataset}/{subdataset}.json
+            os.path.join(self.dataset_path, subdataset_name, f"{subdataset_name}.json"),
+            # 备选：dataset_path/{subdataset}.json
+            os.path.join(self.dataset_path, f"{subdataset_name}.json"),
+        ]
         
-        # 检查文件是否存在
-        if not os.path.exists(dataset_file):
-            raise FileNotFoundError(f"Dataset file not found: {dataset_file}")
+        dataset_file = None
+        for path in local_paths:
+            if os.path.exists(path):
+                dataset_file = path
+                print(f"[MR-GMS8K] ✅ Found dataset at: {dataset_file}")
+                break
+        
+        if dataset_file is None:
+            error_msg = (
+                f"Failed to load dataset '{subdataset_name}' for MR-GMS8K.\n"
+                f"Tried paths:\n"
+            )
+            for path in local_paths:
+                error_msg += f"  - {path}\n"
+            error_msg += (
+                f"\nSolutions:\n"
+                f"  - Ensure the dataset file exists in one of the above paths\n"
+                f"  - Check that the dataset name '{subdataset_name}' is correct"
+            )
+            raise FileNotFoundError(error_msg)
         
         # 加载数据集
         with open(dataset_file, "r", encoding="utf-8") as f:
@@ -55,10 +83,12 @@ class MR_GMS8KBenchmarker(BaseBench):
             # 假设字典中包含一个键对应的数据列表
             for key, value in dataset.items():
                 if isinstance(value, list):
+                    print(f"[MR-GMS8K] ✅ Loaded {len(value)} items from {dataset_file}")
                     return value
             # 如果找不到列表，返回空列表
             return []
         
+        print(f"[MR-GMS8K] ✅ Loaded {len(dataset)} items from {dataset_file}")
         return dataset
     
     def _prepare_prompt(self, item: Dict) -> str:

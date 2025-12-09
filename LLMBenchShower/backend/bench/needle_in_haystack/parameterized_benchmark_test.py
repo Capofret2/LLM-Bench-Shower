@@ -271,14 +271,14 @@ class ParameterizedBenchmarkTester:
                 if self.local_model is None or self.local_tokenizer is None:
                     return None
                 
-                result = await self.benchmarker.evaluate_local_llm(
+                result = self.benchmarker.evaluate_local_llm(
                     self.local_model, self.local_tokenizer, test_params
                 )
             else:
                 if self.api_client is None:
                     return None
                 
-                result = await self.benchmarker.evaluate_api_llm(
+                result = self.benchmarker.evaluate_api_llm(
                     self.api_client, test_params
                 )
             

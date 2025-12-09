@@ -44,7 +44,9 @@ if _cmmmu_available:
 if _mr_gms8k_available:
     ALL_BENCHMARKERS["MR-GMS8K"] = MR_GMS8KBenchmarker
 if _needle_available:
+    # Support both naming conventions
     ALL_BENCHMARKERS["NeedleInHaystack"] = NeedleInHaystackBenchmarker
+    ALL_BENCHMARKERS["NeedleInAHaystack"] = NeedleInHaystackBenchmarker  # Alias for consistency with config
 
 
 def get_benchmarker(bench_name) -> BaseBench | None:

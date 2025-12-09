@@ -24,7 +24,7 @@ class LongBenchV2Benchmarker(BaseBench):
         self.sub_datasets = get_sub_datasets("LongBenchV2")
 
     def _load_dataset(self, subdataset_name: str) -> List[Dict]:
-        """Load a subdataset from disk.
+        """Load a subdataset from disk, with fallback options.
 
         Args:
             subdataset_name (str): The name of the subdataset to load.
@@ -45,17 +45,35 @@ class LongBenchV2Benchmarker(BaseBench):
                     continue
             return all_data
         
-        # Load specific domain dataset
-        # The structure is /domains/{domain_name}/data.jsonl
-        domain_path = os.path.join(self.dataset_path, subdataset_name)
-        file_path = os.path.join(domain_path, "data.jsonl")
+        # 只从测试数据路径加载
+        # 从 benchmarker.py 回到项目根目录: backend/bench/longbench_v2 -> backend/bench -> backend -> LLMBenchShower -> 项目根
+        test_data_base = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "tests", "test_data")
         
-        if not os.path.exists(file_path):
-            # Try alternative structure
-            file_path = os.path.join(self.dataset_path, f"{subdataset_name}.jsonl")
+        local_paths = [
+            # 测试数据路径：tests/test_data/LongBenchV2/{domain}/data.jsonl
+            os.path.join(test_data_base, "LongBenchV2", subdataset_name, "data.jsonl"),
+        ]
         
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Dataset file not found for {subdataset_name}")
+        file_path = None
+        for path in local_paths:
+            if os.path.exists(path):
+                file_path = path
+                print(f"[LongBenchV2] ✅ Found dataset at: {file_path}")
+                break
+        
+        if file_path is None:
+            error_msg = (
+                f"Failed to load dataset '{subdataset_name}' for LongBenchV2.\n"
+                f"Tried paths:\n"
+            )
+            for path in local_paths:
+                error_msg += f"  - {path}\n"
+            error_msg += (
+                f"\nSolutions:\n"
+                f"  - Ensure the dataset file exists in one of the above paths\n"
+                f"  - Check that the dataset name '{subdataset_name}' is correct"
+            )
+            raise FileNotFoundError(error_msg)
         
         data = []
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -63,6 +81,7 @@ class LongBenchV2Benchmarker(BaseBench):
                 if line.strip():
                     data.append(json.loads(line))
         
+        print(f"[LongBenchV2] ✅ Loaded {len(data)} items from {file_path}")
         return data
 
     def _prepare_prompt(self, item: Dict) -> str:
@@ -146,6 +165,7 @@ class LongBenchV2Benchmarker(BaseBench):
         tokenizer: AutoTokenizer,
         subdataset_name: str,
         *args,
+        max_samples: int = None,
         **kwargs,
     ) -> Dict:
         """Evaluate a local LLM on LongBenchV2 dataset.
@@ -154,12 +174,18 @@ class LongBenchV2Benchmarker(BaseBench):
             model (AutoModelForCausalLM): The local LLM model to evaluate.
             tokenizer (AutoTokenizer): The tokenizer for the LLM model.
             subdataset_name (str): The name of the domain/subdataset to evaluate on.
+            max_samples (int, optional): Maximum number of samples to evaluate. If None, evaluates all.
             **kwargs: Additional keyword arguments.
 
         Returns:
             Dict: Evaluation results containing metrics and predictions.
         """
         dataset = self._load_dataset(subdataset_name)
+        
+        # Limit samples if specified (useful for testing)
+        if max_samples is not None and max_samples > 0:
+            dataset = dataset[:max_samples]
+            print(f"[LongBenchV2] Limiting evaluation to {max_samples} samples (out of {len(self._load_dataset(subdataset_name))} total)")
         
         results = {
             "dataset": subdataset_name,
@@ -232,6 +258,7 @@ class LongBenchV2Benchmarker(BaseBench):
         model: str,
         subdataset_name: str,
         *args,
+        max_samples: int = None,
         **kwargs,
     ) -> Dict:
         """Evaluate an API LLM on LongBenchV2 dataset.
@@ -240,12 +267,18 @@ class LongBenchV2Benchmarker(BaseBench):
             client (Client): The OpenAI client for API calls.
             model (str): The model name to evaluate (e.g., "gpt-4").
             subdataset_name (str): The name of the domain/subdataset to evaluate on.
+            max_samples (int, optional): Maximum number of samples to evaluate. If None, evaluates all.
             **kwargs: Additional keyword arguments for API calls.
 
         Returns:
             Dict: Evaluation results containing metrics and predictions.
         """
         dataset = self._load_dataset(subdataset_name)
+        
+        # Limit samples if specified (useful for testing)
+        if max_samples is not None and max_samples > 0:
+            dataset = dataset[:max_samples]
+            print(f"[LongBenchV2] Limiting evaluation to {max_samples} samples (out of {len(self._load_dataset(subdataset_name))} total)")
         
         results = {
             "dataset": subdataset_name,

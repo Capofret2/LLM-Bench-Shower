@@ -20,22 +20,60 @@ class CMMMUBenchmarker(BaseBench):
         self.dataset_path = get_dataset_path("CMMMU")
 
     def _load_dataset(self, subdataset_name: str) -> List[Dict]:
-        """Load dataset from local JSONL files."""
-        # dataset_path/subdataset_name/subdataset_name.jsonl
-        subdir = os.path.join(self.dataset_path, subdataset_name)
-        file_path = os.path.join(subdir, f"{subdataset_name}.jsonl")
-        self.image_path = subdir
+        """Load dataset from local JSONL files, with fallback options."""
+        # 优先尝试从测试数据路径加载: /root/LLM-Bench-Shower/tests/test_data/CMMMU/cmmmu-data-dev/{subject}/{subject}.jsonl
+        # 从 benchmarker.py 回到项目根目录: backend/bench/cmmmu -> backend/bench -> backend -> LLMBenchShower -> 项目根
+        test_data_base = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "tests", "test_data")
+        
+        local_paths = [
+            # 测试数据路径：tests/test_data/CMMMU/cmmmu-data-dev/{subject}/{subject}.jsonl
+            os.path.join(test_data_base, "CMMMU", "cmmmu-data-dev", subdataset_name, f"{subdataset_name}.jsonl"),
+            os.path.join(test_data_base, "CMMMU", "cmmmu-data-test", subdataset_name, f"{subdataset_name}.jsonl"),
+            os.path.join(test_data_base, "CMMMU", "cmmmu-data-val", subdataset_name, f"{subdataset_name}.jsonl"),
+            # 生产数据路径：/root/share/datasets/CMMMU/CMMMU/cmmmu-data-dev/{subject}/{subject}.jsonl
+            os.path.join(self.dataset_path, "CMMMU", "cmmmu-data-dev", subdataset_name, f"{subdataset_name}.jsonl"),
+            os.path.join(self.dataset_path, "CMMMU", "cmmmu-data-test", subdataset_name, f"{subdataset_name}.jsonl"),
+            os.path.join(self.dataset_path, "CMMMU", "cmmmu-data-val", subdataset_name, f"{subdataset_name}.jsonl"),
+            # 旧路径：dataset_path/subdataset_name/subdataset_name.jsonl
+            os.path.join(self.dataset_path, subdataset_name, f"{subdataset_name}.jsonl"),
+        ]
+        
+        file_path = None
+        for path in local_paths:
+            if os.path.exists(path):
+                file_path = path
+                print(f"[CMMMU] ✅ Found dataset at: {file_path}")
+                break
+        
+        if file_path is None:
+            error_msg = (
+                f"Failed to load dataset '{subdataset_name}' for CMMMU.\n"
+                f"Tried paths:\n"
+            )
+            for path in local_paths:
+                error_msg += f"  - {path}\n"
+            error_msg += (
+                f"\nSolutions:\n"
+                f"  - Ensure the dataset file exists in one of the above paths\n"
+                f"  - Check that the dataset name '{subdataset_name}' is correct"
+            )
+            raise FileNotFoundError(error_msg)
+        
+        # 设置图片路径（使用找到的文件所在目录）
+        self.image_path = os.path.dirname(file_path)
         data = []
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 for line in f:
-                    item = json.loads(line)
-                    item['subject_name'] = subdataset_name
-                    data.append(item)
+                    if line.strip():
+                        item = json.loads(line)
+                        item['subject_name'] = subdataset_name
+                        data.append(item)
+            print(f"[CMMMU] ✅ Loaded {len(data)} items from {file_path}")
             return data
 
         except Exception as e:
-            raise RuntimeError(f"Error loading dataset {subdataset_name}: {e}")
+            raise RuntimeError(f"Error loading dataset {subdataset_name} from {file_path}: {e}")
 
     def _clean_text(self, text: str) -> str:
         """Remove <img...> tags and extra whitespace."""
@@ -245,12 +283,26 @@ class CMMMUBenchmarker(BaseBench):
                         temperature=0.7,
                         top_p=0.9
                     )
-                #print("[debug local] outputs:", outputs)
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                #print("[debug local] response1:", response)
-                # Remove prompt
-                response = response[:].strip()
-                #print("[debug local] response2:", response)
+                
+                # Extract only the generated text (excluding the prompt)
+                try:
+                    if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
+                        input_length = inputs["input_ids"].shape[1]
+                        # Decode only the newly generated tokens
+                        response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                    else:
+                        # Fallback: decode full output and remove prompt
+                        full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                except Exception as e:
+                    # Fallback: decode full output and try to remove prompt
+                    print(f"[CMMMU] Warning: Error extracting new tokens: {e}, using fallback method")
+                    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                
+                response = response.strip()
+                print(f"[CMMMU] Generated response: {response[:100]}..." if len(response) > 100 else f"[CMMMU] Generated response: {response}")
+                
                 ground_truth = item.get("answer", "")
                 
                 # Calculate score

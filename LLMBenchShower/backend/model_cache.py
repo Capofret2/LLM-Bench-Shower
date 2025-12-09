@@ -622,9 +622,30 @@ class ModelCache:
         self._make_space_on_gpu(estimated_memory)
 
         # Load model and tokenizer
+        # Import envs to get memory limits
+        from . import envs
+        
+        model_kwargs = {
+            "device_map": self.device_map,
+        }
+        
+        # Add max_memory if GPU memory limit is set
+        max_memory = envs.get_max_memory()
+        if max_memory is not None:
+            model_kwargs["max_memory"] = max_memory
+        
+        # Add torch_dtype if specified
+        torch_dtype = envs.get_torch_dtype()
+        if torch_dtype != "auto":
+            model_kwargs["torch_dtype"] = torch_dtype
+        
+        # Add trust_remote_code if enabled
+        if envs.LBS_TRUST_REMOTE_CODE:
+            model_kwargs["trust_remote_code"] = True
+        
         model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            device_map=self.device_map,
+            **model_kwargs
         )
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 

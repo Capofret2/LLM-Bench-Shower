@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Bench Shower</title>
+  <script>
+    // 前端与后端分离时，设置后端地址；可在控制台执行：
+    // localStorage.setItem('lbs_api_base', 'http://127.0.0.1:5000');
+    window.API_BASE =
+      window.localStorage.getItem("lbs_api_base") || "http://127.0.0.1:5000";
+  </script>
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>LLM Bench Shower</h1>
+    <p>选择本地模型，挑选数据集，一键跑测评并查看结果。</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>配置</h2>
+      <form id="bench-form">
+        <label class="field">
+          <span>本地模型路径或名称</span>
+          <input id="model-path" type="text" required placeholder="例如：/models/qwen or Qwen/Qwen2-7B" />
+        </label>
+
+        <label class="field">
+          <span>选择数据集（可多选）</span>
+          <select id="dataset-select" multiple size="8"></select>
+          <small>单子数据集直接显示名称，多子数据集显示：父数据集 / 子数据集</small>
+        </label>
+
+        <div class="actions">
+          <button id="run-btn" type="submit">开始测评</button>
+          <button id="reset-btn" type="button">重置</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>进度</h2>
+      <div id="status-box" class="status-box">等待开始…</div>
+      <ul id="pending-list" class="status-list"></ul>
+    </section>
+
+    <section class="card">
+      <h2>结果</h2>
+      <div id="results"></div>
+    </section>
+  </main>
+
+  <script src="./js/app.js"></script>
+</body>
+</html>

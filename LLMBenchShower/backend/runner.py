@@ -103,30 +103,64 @@ class LLMBenchRunner:
                 self.input_queue.task_done()
                 continue
 
+            dataset_name = request.get("dataset_name", "unknown")
+            model_name = request.get("model_name_or_path", "unknown")
+            print(f"[Runner] ========== STARTING REQUEST ==========")
+            print(f"[Runner] Request ID: {req_id}")
+            print(f"[Runner] Dataset: {dataset_name}")
+            print(f"[Runner] Model: {model_name}")
+            print(f"[Runner] Input queue remaining: {self.input_queue.qsize()}")
+
             try:
                 # Process the request (exclude req_id from processing params)
                 result = self._process_single_request(request)
+                print(f"[Runner] Request {req_id} completed successfully")
+                print(f"[Runner] Result keys: {list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
                 # Put result in output queue
                 response = BenchResponse(req_id=req_id, result=result, error=None)
                 self.output_queue.put(response)
+                print(f"[Runner] Result added to output queue. Output queue size: {self.output_queue.qsize()}")
+                print(f"[Runner] ========== REQUEST COMPLETED ==========")
             except Exception as e:
                 # Put error response in output queue
                 error_msg = f"Error processing request: {str(e)}"
+                print(f"[Runner] Request {req_id} failed with error: {error_msg}")
+                import traceback
+                traceback.print_exc()
                 response = BenchResponse(req_id=req_id, result={}, error=error_msg)
                 self.output_queue.put(response)
+                print(f"[Runner] Error response added to output queue. Output queue size: {self.output_queue.qsize()}")
+                print(f"[Runner] ========== REQUEST FAILED ==========")
             finally:
                 self.input_queue.task_done()
 
     def _process_single_request(self, request: Dict[str, Any]) -> Dict:
         """Process a single benchmark request."""
         model_type: bytes = request.get("model_type", b"local")
-        match model_type:
-            case b"local":
-                return self.eval_local_model_fn(**request)
-            case b"api":
-                return self.eval_api_model(**request)
-            case _:
-                raise ValueError(f"Unknown model_type: {model_type}")
+        dataset_name = request.get("dataset_name", "unknown")
+        model_path = request.get("model_name_or_path", "unknown")
+        print(f"[Runner] Processing request: dataset={dataset_name}, model={model_path}, type={model_type}")
+        try:
+            match model_type:
+                case b"local":
+                    result = self.eval_local_model_fn(**request)
+                    print(f"[Runner] Request completed: dataset={dataset_name}, result_keys={list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
+                    return result
+                case b"api":
+                    result = self.eval_api_model(**request)
+                    print(f"[Runner] Request completed: dataset={dataset_name}, result_keys={list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
+                    return result
+                case _:
+                    raise ValueError(f"Unknown model_type: {model_type}")
+        except KeyError as e:
+            # Provide more helpful error message for missing benchmarker
+            if "NeedleInAHaystack" in str(e) or "NeedleInHaystack" in str(e):
+                available = list(self.benchmarkers.keys())
+                raise ValueError(
+                    f"Benchmarker not found. Available benchmarkers: {available}. "
+                    f"Requested: {request.get('dataset_name', 'unknown')}"
+                ) from e
+            raise
 
     def _mark_dirty(self, pair: ModelDatasetPair):
         with self._dirty_lock:
@@ -181,30 +215,141 @@ class LLMBenchRunner:
         **kwargs,
     ) -> Dict:
         pair = ModelDatasetPair(model_name_or_path, dataset_name)
+        print(f"[Runner] eval_local_model_uncached: model={model_name_or_path}, dataset={dataset_name}")
         if pair in self.bench_history:
-            return self.bench_history[pair]
+            cached_result = self.bench_history[pair]
+            print(f"[Runner] Found cached result for {pair}, returning from cache")
+            print(f"[Runner] Cached result keys: {list(cached_result.keys()) if isinstance(cached_result, dict) else 'not_dict'}")
+            print(f"[Runner] Cached result evaluation_type: {cached_result.get('evaluation_type', 'not_set') if isinstance(cached_result, dict) else 'not_dict'}")
+            # For NeedleInAHaystack, we want to force re-run to get parameterized results
+            if "NeedleInAHaystack" in dataset_name:
+                print(f"[Runner] NeedleInAHaystack detected - forcing re-run to get parameterized results (ignoring cache)")
+                # Don't return cached result, continue to run new test
+            else:
+                return cached_result
+        print(f"[Runner] No cached result (or cache bypassed), loading model and running benchmark...")
         supdataset_name, subdataset_name = self._split_dataset_name(dataset_name)
+        print(f"[Runner] Split dataset: sup={supdataset_name}, sub={subdataset_name}")
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path, device_map=self.device_map
-        )
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        # Prepare model loading kwargs
+        model_kwargs = {
+            "device_map": self.device_map,
+        }
+        
+        # Add torch_dtype if specified
+        torch_dtype = envs.get_torch_dtype()
+        if torch_dtype != "auto":
+            model_kwargs["torch_dtype"] = torch_dtype
+            dtype_name = str(torch_dtype).replace("torch.", "") if isinstance(torch_dtype, type) else str(torch_dtype)
+            print(f"[Runner] Configuring model with torch_dtype: {dtype_name}")
+        else:
+            print(f"[Runner] Using torch_dtype: auto (will use model's default, likely float32)")
+        
+        # Add max_memory if GPU memory limit is set
+        max_memory = envs.get_max_memory()
+        if max_memory is not None:
+            model_kwargs["max_memory"] = max_memory
+            if torch.cuda.is_available():
+                total_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                limit_mem = max_memory[0] / 1024**3
+                print(f"[Runner] GPU memory limit set: {limit_mem:.2f} GB / {total_mem:.2f} GB ({envs.LBS_GPU_MEMORY_LIMIT*100:.1f}%)")
+        
+        # Add trust_remote_code if enabled
+        if envs.LBS_TRUST_REMOTE_CODE:
+            model_kwargs["trust_remote_code"] = True
+        
+        # Load model with GPU fallback to CPU on OOM
+        print(f"[Runner] Loading model from {model_name_or_path}...")
+        if torch.cuda.is_available():
+            print(f"[Runner] GPU memory before loading: {torch.cuda.memory_allocated() / 1024**3:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path, **model_kwargs
+            )
+            # Check actual dtype used
+            actual_dtype = next(model.parameters()).dtype
+            print(f"[Runner] Model loaded successfully on device: {self.device_map}")
+            print(f"[Runner] Actual model dtype: {actual_dtype}")
+            if torch.cuda.is_available():
+                print(f"[Runner] GPU memory after loading: {torch.cuda.memory_allocated() / 1024**3:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+        except torch.cuda.OutOfMemoryError as e:
+            print(f"[Runner] GPU OOM during model loading: {e}")
+            print(f"[Runner] Falling back to CPU...")
+            # Fallback to CPU: remove GPU-specific kwargs and set device_map to CPU
+            cpu_model_kwargs = model_kwargs.copy()
+            cpu_model_kwargs["device_map"] = "cpu"
+            if "max_memory" in cpu_model_kwargs:
+                del cpu_model_kwargs["max_memory"]  # Remove max_memory for CPU
+            # Clear GPU cache before retrying
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path, **cpu_model_kwargs
+            )
+            print(f"[Runner] Model loaded successfully on CPU (fallback)")
+            self.device_map = "cpu"  # Update device_map for this request
+        except Exception as e:
+            print(f"[Runner] Error loading model: {e}")
+            raise
+        
+        # Load tokenizer
+        print(f"[Runner] Loading tokenizer from {model_name_or_path}...")
+        tokenizer_kwargs = {}
+        if envs.LBS_TRUST_REMOTE_CODE:
+            tokenizer_kwargs["trust_remote_code"] = True
+        
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **tokenizer_kwargs)
+        print(f"[Runner] Tokenizer loaded successfully")
 
-        benchmark_results = self.benchmarkers[supdataset_name].evaluate_local_llm(
+        # Set pad_token if not present (required for some models like Llama)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        # Get benchmarker (handle naming variations)
+        if supdataset_name not in self.benchmarkers:
+            # Try alternative naming (e.g., NeedleInAHaystack vs NeedleInHaystack)
+            alt_name = supdataset_name.replace("NeedleInAHaystack", "NeedleInHaystack").replace("NeedleInHaystack", "NeedleInAHaystack")
+            if alt_name in self.benchmarkers:
+                benchmarker = self.benchmarkers[alt_name]
+            else:
+                available = list(self.benchmarkers.keys())
+                raise KeyError(
+                    f"Benchmarker '{supdataset_name}' not found. "
+                    f"Available benchmarkers: {available}. "
+                    f"Dataset name: {dataset_name}"
+                )
+        else:
+            benchmarker = self.benchmarkers[supdataset_name]
+        
+        print(f"[Runner] Calling benchmarker.evaluate_local_llm: supdataset={supdataset_name}, subdataset={subdataset_name}")
+        print(f"[Runner] Benchmarker type: {type(benchmarker).__name__}")
+        benchmark_results = benchmarker.evaluate_local_llm(
             model=model,
             tokenizer=tokenizer,
             subdataset_name=subdataset_name,
             *args,
             **kwargs,
         )
+        print(f"[Runner] Benchmarker returned: result_type={type(benchmark_results)}, keys={list(benchmark_results.keys()) if isinstance(benchmark_results, dict) else 'not_dict'}")
+        if isinstance(benchmark_results, dict):
+            print(f"[Runner] Result evaluation_type: {benchmark_results.get('evaluation_type', 'not_set')}")
+            print(f"[Runner] Result total_tests: {benchmark_results.get('total_tests', 'not_set')}")
         # Save to memory and mark for write-back
         self.bench_history[pair] = benchmark_results
         self._mark_dirty(pair)
 
+        print(f"[Runner] Releasing model and tokenizer...")
+        if torch.cuda.is_available():
+            print(f"[Runner] GPU memory before release: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         del model
         del tokenizer
         torch.cuda.empty_cache()
         gc.collect()
+        if torch.cuda.is_available():
+            print(f"[Runner] GPU memory after release: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
         return benchmark_results
 
@@ -216,20 +361,69 @@ class LLMBenchRunner:
         **kwargs,
     ) -> Dict:
         pair = ModelDatasetPair(model_name_or_path, dataset_name)
+        print(f"[Runner] eval_local_model_cached: model={model_name_or_path}, dataset={dataset_name}")
         if pair in self.bench_history:
-            return self.bench_history[pair]
+            cached_result = self.bench_history[pair]
+            print(f"[Runner] Found cached result for {pair}, returning from cache")
+            print(f"[Runner] Cached result keys: {list(cached_result.keys()) if isinstance(cached_result, dict) else 'not_dict'}")
+            print(f"[Runner] Cached result evaluation_type: {cached_result.get('evaluation_type', 'not_set') if isinstance(cached_result, dict) else 'not_dict'}")
+            # For NeedleInAHaystack, we want to force re-run to get parameterized results
+            if "NeedleInAHaystack" in dataset_name:
+                print(f"[Runner] NeedleInAHaystack detected - forcing re-run to get parameterized results (ignoring cache)")
+                # Don't return cached result, continue to run new test
+                # For NeedleInAHaystack, use uncached version to ensure memory is released after use
+                print(f"[Runner] Using uncached evaluation for NeedleInAHaystack to ensure memory release")
+                return self.eval_local_model_uncached(model_name_or_path, dataset_name, *args, **kwargs)
+            else:
+                return cached_result
+        print(f"[Runner] No cached result (or cache bypassed), using model cache...")
         supdataset_name, subdataset_name = self._split_dataset_name(dataset_name)
+        print(f"[Runner] Split dataset: sup={supdataset_name}, sub={subdataset_name}")
 
         # Use model cache to get model and tokenizer
+        print(f"[Runner] Getting model from cache: {model_name_or_path}")
+        if torch.cuda.is_available():
+            print(f"[Runner] Current GPU memory before loading: {torch.cuda.memory_allocated() / 1024**3:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+            # Clear cache before loading if memory is low
+            if torch.cuda.memory_allocated() / torch.cuda.get_device_properties(0).total_memory > 0.9:
+                print(f"[Runner] GPU memory usage > 90%, clearing cache before loading...")
+                torch.cuda.empty_cache()
+                gc.collect()
         model, tokenizer = self.model_cache.get_model(model_name_or_path)
+        print(f"[Runner] Model retrieved from cache")
+        if torch.cuda.is_available():
+            print(f"[Runner] Current GPU memory after loading: {torch.cuda.memory_allocated() / 1024**3:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
 
-        benchmark_results = self.benchmarkers[supdataset_name].evaluate_local_llm(
+        # Get benchmarker (handle naming variations)
+        print(f"[Runner] Getting benchmarker: supdataset={supdataset_name}, subdataset={subdataset_name}")
+        if supdataset_name not in self.benchmarkers:
+            # Try alternative naming (e.g., NeedleInAHaystack vs NeedleInHaystack)
+            alt_name = supdataset_name.replace("NeedleInAHaystack", "NeedleInHaystack").replace("NeedleInHaystack", "NeedleInAHaystack")
+            if alt_name in self.benchmarkers:
+                benchmarker = self.benchmarkers[alt_name]
+            else:
+                available = list(self.benchmarkers.keys())
+                raise KeyError(
+                    f"Benchmarker '{supdataset_name}' not found. "
+                    f"Available benchmarkers: {available}. "
+                    f"Dataset name: {dataset_name}"
+                )
+        else:
+            benchmarker = self.benchmarkers[supdataset_name]
+
+        print(f"[Runner] Calling benchmarker.evaluate_local_llm: supdataset={supdataset_name}, subdataset={subdataset_name}")
+        print(f"[Runner] Benchmarker type: {type(benchmarker).__name__}")
+        benchmark_results = benchmarker.evaluate_local_llm(
             model=model,
             tokenizer=tokenizer,
             subdataset_name=subdataset_name,
             *args,
             **kwargs,
         )
+        print(f"[Runner] Benchmarker returned: result_type={type(benchmark_results)}, keys={list(benchmark_results.keys()) if isinstance(benchmark_results, dict) else 'not_dict'}")
+        if isinstance(benchmark_results, dict):
+            print(f"[Runner] Result evaluation_type: {benchmark_results.get('evaluation_type', 'not_set')}")
+            print(f"[Runner] Result total_tests: {benchmark_results.get('total_tests', 'not_set')}")
         # Save to memory and mark for write-back
         self.bench_history[pair] = benchmark_results
         self._mark_dirty(pair)
@@ -250,7 +444,24 @@ class LLMBenchRunner:
             return self.bench_history[pair]
         supdataset_name, subdataset_name = self._split_dataset_name(dataset_name)
         client = Client(api_key=openai_api_key, base_url=base_url)
-        benchmark_results = self.benchmarkers[supdataset_name].evaluate_api_llm(
+        
+        # Get benchmarker (handle naming variations)
+        if supdataset_name not in self.benchmarkers:
+            # Try alternative naming (e.g., NeedleInAHaystack vs NeedleInHaystack)
+            alt_name = supdataset_name.replace("NeedleInAHaystack", "NeedleInHaystack").replace("NeedleInHaystack", "NeedleInAHaystack")
+            if alt_name in self.benchmarkers:
+                benchmarker = self.benchmarkers[alt_name]
+            else:
+                available = list(self.benchmarkers.keys())
+                raise KeyError(
+                    f"Benchmarker '{supdataset_name}' not found. "
+                    f"Available benchmarkers: {available}. "
+                    f"Dataset name: {dataset_name}"
+                )
+        else:
+            benchmarker = self.benchmarkers[supdataset_name]
+        
+        benchmark_results = benchmarker.evaluate_api_llm(
             client=client,
             model=model_name,
             subdataset_name=subdataset_name,
@@ -270,9 +481,12 @@ class LLMBenchRunner:
             b"api",
         ]:
             raise ValueError("Request must contain valid 'model_type' field")
+        print(f"[Runner] Adding request to input queue: req_id={request.get('req_id')}, queue_size_before={self.input_queue.qsize()}")
         self.input_queue.put(request)
+        print(f"[Runner] Request added. Queue size after: {self.input_queue.qsize()}")
 
     def submit_requests(self, requests: List[Dict[str, Any]]):
+        print(f"[Runner] submit_requests called with {len(requests)} requests")
         for request in requests:
             self.submit_request(request)
 

@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import re
 from typing import Dict, List, Any
@@ -21,7 +22,7 @@ class C_EvalBenchmarker(BaseBench):
         self.sub_datasets = get_sub_datasets("C-Eval")
 
     def _load_dataset(self, subdataset_name: str) -> List[Dict]:
-        """Load a subdataset using Hugging Face datasets.
+        """Load a subdataset from local files or Hugging Face.
 
         Args:
             subdataset_name (str): The name of the subdataset (subject) to load.
@@ -29,29 +30,106 @@ class C_EvalBenchmarker(BaseBench):
         Returns:
             List[Dict]: The loaded dataset as a list of dictionaries.
         """
-        # 加载具体子科目 (Hugging Face 直接加载)
-        try:
-            # path: 远程仓库地址
-            # name: 具体科目 (e.g.'computer_network')
-            # split: C-Eval通常验证用 'val' (test集无答案)
-            # cache_dir: 指定本地缓存目录
-            dataset = load_dataset(
-                path="ceval/ceval-exam",
-                name=subdataset_name,
-                split="val",
-                trust_remote_code=True,
-                cache_dir=self.dataset_path
+        # 如果 subdataset_name 是 "C-Eval"，提示用户选择具体的科目
+        if subdataset_name == "C-Eval":
+            available_subjects = [f for f in os.listdir(self.dataset_path) 
+                                 if f.endswith('.jsonl') and os.path.isfile(os.path.join(self.dataset_path, f))]
+            available_subjects = [f.replace('.jsonl', '') for f in available_subjects]
+            error_msg = (
+                f"C-Eval requires a specific subject name, not 'C-Eval'.\n"
+                f"Available subjects in {self.dataset_path}:\n"
+                f"  {', '.join(sorted(available_subjects)[:10])}{'...' if len(available_subjects) > 10 else ''}\n"
+                f"\n"
+                f"Please use format: C-Eval/{{subject_name}}\n"
+                f"Example: C-Eval/computer_network, C-Eval/high_school_mathematics"
             )
-            data_list = []
-            for item in dataset:
-                item_dict = dict(item)
-                item_dict['subject_name'] = subdataset_name
-                data_list.append(item_dict)
-            #print("[debug] data_list loaded:", data_list)
-            return data_list
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to load dataset {subdataset_name} via Hugging Face: {e}")
+            raise ValueError(error_msg)
+        
+        # 优先尝试从测试数据路径加载
+        # 从 benchmarker.py 回到项目根目录: backend/bench/c_eval -> backend/bench -> backend -> LLMBenchShower -> 项目根
+        test_data_base = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "tests", "test_data")
+        
+        # 构建所有可能的路径（测试数据优先）
+        local_paths = [
+            # 测试数据路径：tests/test_data/C-Eval/{subject}.jsonl
+            os.path.join(test_data_base, "C-Eval", f"{subdataset_name}.jsonl"),
+            # 生产数据路径：/root/share/datasets/C-Eval/{subject}.jsonl
+            os.path.join(self.dataset_path, f"{subdataset_name}.jsonl"),
+        ]
+        
+        local_file = None
+        for path in local_paths:
+            if os.path.exists(path):
+                local_file = path
+                print(f"[C-Eval] ✅ Found dataset at: {local_file}")
+                break
+        
+        if local_file:
+            try:
+                data_list = []
+                with open(local_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            item = json.loads(line)
+                            # 确保 subject_name 字段存在
+                            if 'subject_name' not in item:
+                                item['subject_name'] = subdataset_name
+                            data_list.append(item)
+                print(f"[C-Eval] ✅ Loaded {len(data_list)} items from local file: {local_file}")
+                return data_list
+            except Exception as e:
+                print(f"[C-Eval] ⚠️  Failed to load from local file {local_file}: {e}")
+                print(f"[C-Eval] Falling back to Hugging Face...")
+        else:
+            print(f"[C-Eval] ⚠️  Local file not found in any of the paths:")
+            for path in local_paths:
+                print(f"  - {path}")
+            print(f"[C-Eval] Attempting to load from Hugging Face...")
+        
+        # 如果本地文件不存在或加载失败，尝试从 Hugging Face 加载
+        # 注意：移除 trust_remote_code，因为新版本的 datasets 库不再支持
+        hf_dataset_names = [
+            "ceval/ceval-exam",  # Hugging Face 数据集名称
+        ]
+        
+        for hf_path in hf_dataset_names:
+            try:
+                print(f"[C-Eval] 📥 Attempting to load from Hugging Face: {hf_path}")
+                # path: 远程仓库地址
+                # name: 具体科目 (e.g.'computer_network')
+                # split: C-Eval通常验证用 'val' (test集无答案)
+                # cache_dir: 指定本地缓存目录
+                dataset = load_dataset(
+                    path=hf_path,
+                    name=subdataset_name,
+                    split="val",
+                    cache_dir=self.dataset_path
+                )
+                data_list = []
+                for item in dataset:
+                    item_dict = dict(item)
+                    item_dict['subject_name'] = subdataset_name
+                    data_list.append(item_dict)
+                print(f"[C-Eval] ✅ Successfully loaded {len(data_list)} items from Hugging Face")
+                return data_list
+            except Exception as e:
+                print(f"[C-Eval] ❌ Failed to load from {hf_path}: {e}")
+                continue
+        
+        # 如果所有方法都失败，提供详细的错误信息
+        error_msg = (
+            f"Failed to load dataset '{subdataset_name}' for C-Eval.\n"
+            f"Tried:\n"
+            f"  1. Local file: {local_file} ({'not found' if not os.path.exists(local_file) else 'load failed'})\n"
+            f"  2. Hugging Face dataset: {hf_dataset_names[0]} (failed)\n"
+            f"\n"
+            f"Solutions:\n"
+            f"  - Ensure the local dataset file exists: {local_file}\n"
+            f"  - Download the dataset using: python /root/share/datasets/C-Eval/download_ceval.py --subjects {subdataset_name}\n"
+            f"  - Or ensure you have internet access to download from Hugging Face\n"
+            f"  - Check that the dataset name '{subdataset_name}' is correct"
+        )
+        raise RuntimeError(error_msg)
 
     def _prepare_prompt(self, item: Dict) -> str:
         """Prepare the prompt from a dataset item (MCQ format).
@@ -159,12 +237,27 @@ class C_EvalBenchmarker(BaseBench):
                         temperature=0.7,
                         top_p=0.9
                     )
-                #print("[debug local] outputs:", outputs)
-                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                #print("[debug local] response1:", response)
-                # Remove prompt
-                response = response[:].strip()
-                #print("[debug local] response2:", response)
+                
+                # Extract only the generated text (excluding the prompt)
+                # Method 1: Decode only new tokens (preferred)
+                try:
+                    if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
+                        input_length = inputs["input_ids"].shape[1]
+                        # Decode only the newly generated tokens
+                        response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                    else:
+                        # Fallback: decode full output and remove prompt
+                        full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                except Exception as e:
+                    # Fallback: decode full output and try to remove prompt
+                    print(f"[C-Eval] Warning: Error extracting new tokens: {e}, using fallback method")
+                    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                
+                response = response.strip()
+                print(f"[C-Eval] Generated response: {response[:100]}..." if len(response) > 100 else f"[C-Eval] Generated response: {response}")
+                
                 ground_truth = item.get("answer", "")
                 
                 # Calculate score
