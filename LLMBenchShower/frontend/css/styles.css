@@ -45,8 +45,7 @@ main {
 }
 
 input,
-select,
-button {
+select {
   padding: 10px 12px;
   border: 1px solid #d1d5db;
   border-radius: 8px;
@@ -99,13 +98,24 @@ button:disabled {
 }
 
 .status-item {
-  display: flex;
-  justify-content: space-between;
-  padding: 8px 10px;
+  padding: 12px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   background: #f9fafb;
+  line-height: 1.6;
+}
+
+.status-item strong {
+  color: #1f2933;
+  font-size: 14px;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.status-item small {
+  color: #6b7280;
+  font-size: 11px;
 }
 
 .status-item.done {
@@ -233,5 +243,211 @@ button:disabled {
   font-size: 12px;
   max-height: 400px;
   overflow-y: auto;
+}
+
+/* Dataset grouping styles */
+.dataset-group {
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 24px;
+  background: #ffffff;
+}
+
+.dataset-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid #2563eb;
+}
+
+.dataset-header h2 {
+  margin: 0;
+  color: #1f2933;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.model-count {
+  color: #6b7280;
+  font-size: 14px;
+  background: #f3f4f6;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+
+/* Comparison section */
+.comparison-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.comparison-section h3 {
+  margin: 0 0 16px 0;
+  color: #374151;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.chart-container {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.chart-container h3 {
+  margin: 0 0 16px 0;
+  color: #374151;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.chart-container canvas {
+  max-height: 400px;
+}
+
+/* Models section */
+.models-section {
+  margin-top: 24px;
+}
+
+.models-section h3 {
+  margin: 0 0 16px 0;
+  color: #374151;
+  font-size: 18px;
+  font-weight: 600;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.model-result-block {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: #ffffff;
+  transition: box-shadow 0.2s ease;
+}
+
+.model-result-block:hover {
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.model-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.model-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #1f2933;
+}
+
+.req-id {
+  font-size: 12px;
+  color: #9ca3af;
+  font-family: ui-monospace, monospace;
+}
+
+.model-result-content {
+  font-family: Arial, sans-serif;
+}
+
+.json-result {
+  background: #1f2933;
+  color: #f9fafb;
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Error section */
+.error-section {
+  margin-top: 24px;
+  padding: 16px;
+  background: #fef2f2;
+  border-radius: 8px;
+  border: 1px solid #fecaca;
+}
+
+.error-section h3 {
+  margin: 0 0 12px 0;
+  color: #991b1b;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.error-block {
+  padding: 12px;
+  margin-bottom: 8px;
+  background: #ffffff;
+  border-radius: 6px;
+  border-left: 4px solid #ef4444;
+  color: #991b1b;
+}
+
+/* Accuracy charts section */
+.full-width {
+  grid-column: 1 / -1;
+}
+
+#accuracy-charts-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+  gap: 24px;
+  margin-top: 16px;
+}
+
+.accuracy-chart-card {
+  background: #ffffff;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.accuracy-chart-card h3 {
+  margin: 0 0 16px 0;
+  color: #1f2933;
+  font-size: 20px;
+  font-weight: 600;
+  padding-bottom: 12px;
+  border-bottom: 2px solid #2563eb;
+}
+
+.accuracy-chart-card .chart-wrapper {
+  position: relative;
+  height: 350px;
+  margin-top: 16px;
+}
+
+.accuracy-chart-card .no-data {
+  text-align: center;
+  padding: 40px 20px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.accuracy-chart-card .chart-legend {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #6b7280;
+  text-align: center;
 }
 

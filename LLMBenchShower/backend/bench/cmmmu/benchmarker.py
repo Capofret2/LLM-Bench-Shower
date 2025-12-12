@@ -4,12 +4,20 @@ import json
 import string
 import torch
 import ast
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from openai import Client
 from ..benchbase import BaseBench
 from ..utils import get_dataset_path
 from PIL import Image
+
+# Try to import AutoProcessor for multimodal models
+try:
+    from transformers import AutoProcessor
+    HAS_PROCESSOR = True
+except ImportError:
+    HAS_PROCESSOR = False
+    AutoProcessor = None
 
 class CMMMUBenchmarker(BaseBench):
     """
@@ -114,57 +122,68 @@ class CMMMUBenchmarker(BaseBench):
         text = " ".join(text.split())
         return text
 
-    def _prepare_prompt(self, item: Dict) -> str:
+    def _prepare_prompt(self, item: Dict) -> Union[str, Dict]:
         """Prepare the prompt from a dataset item (MCQ format).
 
         Args:
             item (Dict): A data item containing question and options.
 
         Returns:
-            str: The formatted prompt.
+            Union[str, Dict]: The formatted prompt. If contains image, returns dict with 'text' and 'images' keys.
         """
         q_type = item.get("type")
+        has_image = False
+        image_data = None
+        question_text = ""
+        
+        # Check if question contains image
+        question = item.get("question", "")
+        if "<img" in question:
+            has_image = True
+            image_data = self._process_question_with_image(question)
+            question_text = image_data["text"]
+            image_obj = image_data["images"]
+        else:
+            question_text = question
         
         if q_type == "选择":
             context = "[选择题]:"
-            question = item.get("question", "")
-            if "<img" in question:
-                question = self._process_question_with_image(question)
             opt_a = item.get("option1", "")
             opt_b = item.get("option2", "")
             opt_c = item.get("option3", "")
             opt_d = item.get("option4", "")
             # 选择题prompt模板
-            prompt = (
-                f"\n\nQuestion:{context}{question}\nA. {opt_a}\nB. {opt_b}\nC. {opt_c}\nD. {opt_d}\n\nAnswer:"
+            prompt_text = (
+                f"\n\nQuestion:{context}{question_text}\nA. {opt_a}\nB. {opt_b}\nC. {opt_c}\nD. {opt_d}\n\nAnswer:"
             )
         elif q_type == "判断":
             context = "[判断题]:"
-            question = item.get("question", "")
-            if "<img" in question:
-                question = self._process_question_with_image(question)
             # 判断题prompt模板
-            prompt = (
-                f"\n\nQuestion:{context}{question}\n\nAnswer:"
+            prompt_text = (
+                f"\n\nQuestion:{context}{question_text}\n\nAnswer:"
             )
         elif q_type == "填空":
             context = "[填空题]:"
-            question = item.get("question", "")
-            if "<img" in question:
-                question = self._process_question_with_image(question)
             # 填空题prompt模板
-            prompt = (
-                f"\n\nQuestion:{context}{question}\n\nAnswer:"
+            prompt_text = (
+                f"\n\nQuestion:{context}{question_text}\n\nAnswer:"
             )
         else:
-            question = item.get("question", "")
-            if "<img" in question:
-                question = self._process_question_with_image(question)
-            prompt = (
-                f"\n\nQuestion:{question}\n\nAnswer:"
+            prompt_text = (
+                f"\n\nQuestion:{question_text}\n\nAnswer:"
             )
-        print("[debug] prompt prepared:", prompt)
-        return prompt
+        
+        # Return dict if has image, otherwise return string
+        if has_image:
+            result = {
+                "text": prompt_text,
+                "images": image_obj
+            }
+            print(f"[CMMMU] Prompt prepared with image: {prompt_text[:100]}...")
+            return result
+        else:
+            print(f"[CMMMU] Prompt prepared (text only): {prompt_text[:100]}...")
+            return prompt_text
 
     def _extract_prediction_label(self, prediction: str, item: Dict) -> str:
         """
@@ -254,12 +273,64 @@ class CMMMUBenchmarker(BaseBench):
         *args,
         **kwargs,
     ) -> Dict:
-        """Evaluate a local LLM on CMMMU dataset."""
+        """Evaluate a local LLM on CMMMU dataset.
+        
+        Supports both text-only and multimodal models.
+        If the model supports images (has processor), uses multimodal processing.
+        Otherwise, falls back to text-only processing (images are ignored).
+        """
         dataset = self._load_dataset(subdataset_name)
+        
+        # Try to detect if model supports multimodal processing
+        # Check if model has a processor attribute or if we can use AutoProcessor
+        processor = None
+        is_multimodal = False
+        
+        # Try to get processor from model or tokenizer
+        # First, try to get model name for AutoProcessor
+        model_name = None
+        if hasattr(model, 'config') and hasattr(model.config, 'name_or_path'):
+            model_name = model.config.name_or_path
+        
+        # Try different methods to get processor
+        if HAS_PROCESSOR and model_name:
+            # Method 1: Try AutoProcessor from model name (most reliable)
+            try:
+                processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+                # Verify it's actually a processor, not just a tokenizer
+                if hasattr(processor, 'image_processor') or hasattr(processor, 'tokenizer'):
+                    is_multimodal = True
+                    print(f"[CMMMU] Created processor from model name: {model_name}")
+                else:
+                    processor = None
+                    print(f"[CMMMU] AutoProcessor created but doesn't appear to support images")
+            except Exception as e:
+                print(f"[CMMMU] Could not create processor from model name: {e}")
+                processor = None
+        
+        # Method 2: Try to get processor from model or tokenizer attributes
+        if not is_multimodal:
+            if hasattr(model, 'processor'):
+                proc = model.processor
+                # Check if it's actually a processor (has image_processor attribute)
+                if hasattr(proc, 'image_processor'):
+                    processor = proc
+                    is_multimodal = True
+                    print("[CMMMU] Using model.processor for multimodal processing")
+            elif hasattr(tokenizer, 'processor'):
+                proc = tokenizer.processor
+                if hasattr(proc, 'image_processor'):
+                    processor = proc
+                    is_multimodal = True
+                    print("[CMMMU] Using tokenizer.processor for multimodal processing")
+        
+        if not is_multimodal:
+            print("[CMMMU] Model does not support multimodal processing, using text-only mode (images will be ignored)")
         
         results = {
             "dataset": subdataset_name,
             "model_type": "local",
+            "multimodal": is_multimodal,
             "predictions": [],
             "metrics": {
                 "total": len(dataset),
@@ -272,9 +343,58 @@ class CMMMUBenchmarker(BaseBench):
         
         for item in dataset:
             try:
-                prompt = self._prepare_prompt(item)
-                inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
-                inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                prompt_data = self._prepare_prompt(item)
+                
+                # Check if prompt contains image
+                if isinstance(prompt_data, dict) and "images" in prompt_data:
+                    # Multimodal processing
+                    if is_multimodal and processor is not None:
+                        try:
+                            # Check if processor supports images parameter
+                            # Some processors use 'image' (singular) instead of 'images' (plural)
+                            image_obj = prompt_data["images"]
+                            
+                            # Try with 'images' parameter first
+                            try:
+                                inputs = processor(
+                                    text=prompt_data["text"],
+                                    images=image_obj,
+                                    return_tensors="pt",
+                                    padding=True
+                                )
+                            except TypeError:
+                                # Try with 'image' parameter (singular)
+                                try:
+                                    inputs = processor(
+                                        text=prompt_data["text"],
+                                        image=image_obj,
+                                        return_tensors="pt",
+                                        padding=True
+                                    )
+                                except TypeError:
+                                    # If processor doesn't support images at all, fall back to text-only
+                                    print(f"[CMMMU] Warning: Processor doesn't support image parameter, using text only")
+                                    inputs = tokenizer(prompt_data["text"], return_tensors="pt", truncation=True, max_length=4096)
+                                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                            
+                            # Move tensors to model device
+                            if isinstance(inputs, dict):
+                                inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v 
+                                         for k, v in inputs.items()}
+                        except Exception as e:
+                            print(f"[CMMMU] Error processing multimodal input: {e}, falling back to text-only")
+                            inputs = tokenizer(prompt_data["text"], return_tensors="pt", truncation=True, max_length=4096)
+                            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                    else:
+                        # Fallback: use text only (ignore image)
+                        print(f"[CMMMU] Warning: Image detected but model doesn't support multimodal, using text only")
+                        inputs = tokenizer(prompt_data["text"], return_tensors="pt", truncation=True, max_length=4096)
+                        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                else:
+                    # Text-only processing
+                    prompt_text = prompt_data if isinstance(prompt_data, str) else prompt_data.get("text", "")
+                    inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=4096)
+                    inputs = {k: v.to(model.device) for k, v in inputs.items()}
                 
                 with torch.no_grad():
                     outputs = model.generate(
@@ -289,16 +409,42 @@ class CMMMUBenchmarker(BaseBench):
                     if "input_ids" in inputs and isinstance(inputs["input_ids"], torch.Tensor):
                         input_length = inputs["input_ids"].shape[1]
                         # Decode only the newly generated tokens
-                        response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                        # For multimodal models, use tokenizer from processor if available
+                        if processor is not None and is_multimodal:
+                            # Processor usually has a tokenizer attribute
+                            if hasattr(processor, 'tokenizer'):
+                                decode_tokenizer = processor.tokenizer
+                            else:
+                                # If processor itself can decode, use it
+                                decode_tokenizer = processor if hasattr(processor, 'decode') else tokenizer
+                            response = decode_tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+                        else:
+                            response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
                     else:
                         # Fallback: decode full output and remove prompt
-                        full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                        response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                        prompt_text = prompt_data["text"] if isinstance(prompt_data, dict) else prompt_data
+                        if processor is not None and is_multimodal:
+                            if hasattr(processor, 'tokenizer'):
+                                decode_tokenizer = processor.tokenizer
+                            else:
+                                decode_tokenizer = processor if hasattr(processor, 'decode') else tokenizer
+                        else:
+                            decode_tokenizer = tokenizer
+                        full_response = decode_tokenizer.decode(outputs[0], skip_special_tokens=True)
+                        response = full_response[len(prompt_text):] if full_response.startswith(prompt_text) else full_response
                 except Exception as e:
                     # Fallback: decode full output and try to remove prompt
                     print(f"[CMMMU] Warning: Error extracting new tokens: {e}, using fallback method")
-                    full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    response = full_response[len(prompt):] if full_response.startswith(prompt) else full_response
+                    prompt_text = prompt_data["text"] if isinstance(prompt_data, dict) else prompt_data
+                    if processor is not None and is_multimodal:
+                        if hasattr(processor, 'tokenizer'):
+                            decode_tokenizer = processor.tokenizer
+                        else:
+                            decode_tokenizer = processor if hasattr(processor, 'decode') else tokenizer
+                    else:
+                        decode_tokenizer = tokenizer
+                    full_response = decode_tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    response = full_response[len(prompt_text):] if full_response.startswith(prompt_text) else full_response
                 
                 response = response.strip()
                 print(f"[CMMMU] Generated response: {response[:100]}..." if len(response) > 100 else f"[CMMMU] Generated response: {response}")
@@ -319,7 +465,9 @@ class CMMMUBenchmarker(BaseBench):
                 results["metrics"]["processed"] += 1
                 
             except Exception as e:
-                print(f"Error processing item: {e}")
+                print(f"[CMMMU] Error processing item: {e}")
+                import traceback
+                traceback.print_exc()
                 results["predictions"].append({
                     "question": item.get("question", ""),
                     "prediction": f"Error: {str(e)}",

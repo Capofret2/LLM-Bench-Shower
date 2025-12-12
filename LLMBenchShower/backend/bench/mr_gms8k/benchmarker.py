@@ -137,11 +137,25 @@ Error Reason (if applicable): [Explanation or None]
         Returns:
             Dictionary containing the ground truth answers.
         """
+        # Map actual data fields to expected field names
+        # Data uses: model_output_solution_correctness, model_output_answer_correctness, etc.
+        # Code expects: solution_correctness, answer_correctness, etc.
+        solution_correctness = item.get("model_output_solution_correctness") or item.get("solution_correctness", "correct")
+        answer_correctness = item.get("model_output_answer_correctness") or item.get("answer_correctness", "correct")
+        first_error_step = item.get("model_output_solution_first_error_step") or item.get("first_error_step", "N/A")
+        error_reason = item.get("model_output_solution_first_error_reason") or item.get("error_reason", "N/A")
+        
+        # Normalize correctness values (ensure lowercase)
+        if isinstance(solution_correctness, str):
+            solution_correctness = solution_correctness.lower().strip()
+        if isinstance(answer_correctness, str):
+            answer_correctness = answer_correctness.lower().strip()
+        
         return {
-            "solution_correctness": item.get("solution_correctness", "correct"),
-            "answer_correctness": item.get("answer_correctness", "correct"),
-            "first_error_step": item.get("first_error_step", "N/A"),
-            "error_reason": item.get("error_reason", "N/A")
+            "solution_correctness": solution_correctness,
+            "answer_correctness": answer_correctness,
+            "first_error_step": first_error_step if first_error_step != "N/A" else None,
+            "error_reason": error_reason if error_reason != "N/A" else None
         }
     
     def _parse_model_response(self, response: str) -> Dict:
@@ -303,12 +317,36 @@ Error Reason (if applicable): [Explanation or None]
             total = len(dataset)
             processed = 0
             
+            # Get progress callback if available
+            progress_callback = kwargs.get("progress_callback")
+            
+            print(f"[MR-GMS8K] Starting evaluation on {total} items...")
+            print(f"[MR-GMS8K] Model device: {next(model.parameters()).device}")
+            print(f"[MR-GMS8K] Model dtype: {next(model.parameters()).dtype}")
+            
+            # Initialize progress
+            if progress_callback:
+                progress_callback(0, total, "初始化中...")
+            
+            import time
+            start_time = time.time()
+            
             # Process each sample
-            for item in dataset:
+            for idx, item in enumerate(dataset, 1):
+                # Print progress every 5 items or on first/last item
+                if idx == 1 or idx == total or idx % 5 == 0:
+                    print(f"[MR-GMS8K] Processing item {idx}/{total} ({idx*100//total}%)")
+                
                 try:
                     # Prepare prompt
                     prompt = self._prepare_prompt(item)
                     
+                    # Update progress with current question
+                    question_text = item.get("question", "")[:100]  # Limit question length
+                    if progress_callback:
+                        progress_callback(idx, total, question_text)
+                    
+                    item_start_time = time.time()
                     # Tokenize and generate response
                     inputs = tokenizer(prompt, return_tensors="pt")
                     # 确保inputs中的tensor被移动到正确的设备
@@ -325,12 +363,18 @@ Error Reason (if applicable): [Explanation or None]
                             pass
                     
                     with torch.no_grad():
+                        # For math problems, use greedy decoding for faster inference
                         output = model.generate(
                             **inputs,
-                            max_new_tokens=500,
-                            temperature=0.0,
-                            do_sample=False
+                            max_new_tokens=512,  # Keep 512 for math problems (may need longer answers)
+                            temperature=0.0,     # Greedy decoding for speed
+                            do_sample=False,     # Disable sampling for faster inference
+                            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
                         )
+                    
+                    item_time = time.time() - item_start_time
+                    if idx <= 3 or idx % 10 == 0:  # Log timing for first 3 items and every 10th item
+                        print(f"[MR-GMS8K] Item {idx} processed in {item_time:.2f}s")
                     
                     # Extract generated text
                     try:
@@ -366,15 +410,27 @@ Error Reason (if applicable): [Explanation or None]
                     })
                     
                     processed += 1
-                    #print(f"Processed {processed}/{total} samples")
                     
                 except Exception as e:
-                    print(f"Error processing sample: {e}")
+                    print(f"[MR-GMS8K] Error processing sample {idx}: {e}")
                     predictions.append(None)
                     ground_truths.append(None)
             
             # Calculate overall scores
             scores = self._calculate_score(predictions, ground_truths)
+            
+            # Calculate performance metrics
+            total_time = time.time() - start_time
+            avg_time_per_item = total_time / total if total > 0 else 0
+            
+            # Print completion summary
+            print(f"[MR-GMS8K] ✅ Evaluation completed: {processed}/{total} items processed")
+            print(f"[MR-GMS8K] ⏱️  Performance: Total time: {total_time:.1f}s, Average: {avg_time_per_item:.2f}s/item, Speed: {total/total_time:.2f} items/s")
+            if scores.get("mr_score") is not None:
+                print(f"[MR-GMS8K] MR Score: {scores['mr_score']:.4f}")
+                print(f"[MR-GMS8K] Answer Accuracy: {scores.get('answer_accuracy', 0):.4f}")
+                print(f"[MR-GMS8K] Solution Accuracy: {scores.get('solution_accuracy', 0):.4f}")
+                print(f"[MR-GMS8K] Error Location Accuracy: {scores.get('error_location_accuracy', 0):.4f}")
             
             # Return final results
             return {
@@ -433,8 +489,13 @@ Error Reason (if applicable): [Explanation or None]
             total = len(dataset)
             processed = 0
             
+            print(f"[MR-GMS8K] Starting API evaluation on {total} items...")
+            
             # Process each sample
-            for item in dataset:
+            for idx, item in enumerate(dataset, 1):
+                # Print progress every 5 items or on first/last item
+                if idx == 1 or idx == total or idx % 5 == 0:
+                    print(f"[MR-GMS8K] Processing item {idx}/{total} ({idx*100//total}%)")
                 try:
                     # Prepare prompt
                     prompt = self._prepare_prompt(item)
@@ -554,15 +615,22 @@ Error Reason (if applicable): [Explanation or None]
                     })
                     
                     processed += 1
-                    #print(f"Processed {processed}/{total} samples")
                     
                 except Exception as e:
-                    print(f"Error processing sample: {str(e)}")
+                    print(f"[MR-GMS8K] Error processing sample {idx}: {str(e)}")
                     predictions.append(None)
                     ground_truths.append(None)
             
             # Calculate overall scores
             scores = self._calculate_score(predictions, ground_truths)
+            
+            # Print completion summary
+            print(f"[MR-GMS8K] ✅ API Evaluation completed: {processed}/{total} items processed")
+            if scores.get("mr_score") is not None:
+                print(f"[MR-GMS8K] MR Score: {scores['mr_score']:.4f}")
+                print(f"[MR-GMS8K] Answer Accuracy: {scores.get('answer_accuracy', 0):.4f}")
+                print(f"[MR-GMS8K] Solution Accuracy: {scores.get('solution_accuracy', 0):.4f}")
+                print(f"[MR-GMS8K] Error Location Accuracy: {scores.get('error_location_accuracy', 0):.4f}")
             
             # Return final results
             return {
@@ -579,7 +647,7 @@ Error Reason (if applicable): [Explanation or None]
             }
             
         except Exception as e:
-            print(f"Error in evaluate_api_llm: {str(e)}")
+            print(f"[MR-GMS8K] Error in evaluate_api_llm: {str(e)}")
             import traceback
             traceback.print_exc()
             return {

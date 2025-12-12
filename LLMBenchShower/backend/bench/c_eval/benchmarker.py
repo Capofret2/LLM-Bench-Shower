@@ -150,7 +150,8 @@ class C_EvalBenchmarker(BaseBench):
         prompt = (
             f"\n\nQuestion:{question}\nA. {opt_a}\nB. {opt_b}\nC. {opt_c}\nD. {opt_d}\n\nAnswer:"
         )
-        print("[debug] prompt prepared:", prompt)
+        # Only print prompt in debug mode (commented out to reduce log noise)
+        # print("[debug] prompt prepared:", prompt)
         return prompt
 
     def _extract_prediction_label(self, prediction: str) -> str:
@@ -223,20 +224,52 @@ class C_EvalBenchmarker(BaseBench):
         }
         
         all_scores = []
+        total_items = len(dataset)
         
-        for item in dataset:
+        # Get progress callback if available
+        progress_callback = kwargs.get("progress_callback")
+        
+        print(f"[C-Eval] Starting evaluation on {total_items} items...")
+        print(f"[C-Eval] Model device: {next(model.parameters()).device}")
+        print(f"[C-Eval] Model dtype: {next(model.parameters()).dtype}")
+        
+        # Initialize progress
+        if progress_callback:
+            progress_callback(0, total_items, "初始化中...")
+        
+        import time
+        start_time = time.time()
+        
+        for idx, item in enumerate(dataset, 1):
+            # Print progress every 5 items or on first/last item
+            if idx == 1 or idx == total_items or idx % 5 == 0:
+                print(f"[C-Eval] Processing item {idx}/{total_items} ({idx*100//total_items}%)")
+            
+            # Update progress with current question
+            question_text = item.get("question", "")[:100]  # Limit question length
+            if progress_callback:
+                progress_callback(idx, total_items, question_text)
+            
             try:
+                item_start_time = time.time()
                 prompt = self._prepare_prompt(item)
                 inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
                 inputs = {k: v.to(model.device) for k, v in inputs.items()}
                 
                 with torch.no_grad():
+                    # For multiple-choice questions, use greedy decoding for faster inference
+                    # Greedy decoding (temperature=0, do_sample=False) is faster and deterministic
                     outputs = model.generate(
                         **inputs,
-                        max_new_tokens=512,
-                        temperature=0.7,
-                        top_p=0.9
+                        max_new_tokens=128,  # Reduced from 512: multiple-choice answers are short
+                        temperature=0.0,    # Greedy decoding for speed
+                        do_sample=False,    # Disable sampling for faster inference
+                        pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
                     )
+                
+                item_time = time.time() - item_start_time
+                if idx <= 3 or idx % 10 == 0:  # Log timing for first 3 items and every 10th item
+                    print(f"[C-Eval] Item {idx} processed in {item_time:.2f}s")
                 
                 # Extract only the generated text (excluding the prompt)
                 # Method 1: Decode only new tokens (preferred)
@@ -282,8 +315,17 @@ class C_EvalBenchmarker(BaseBench):
                     "score": 0.0,
                 })
         
+        total_time = time.time() - start_time
+        avg_time_per_item = total_time / total_items if total_items > 0 else 0
+        
         if all_scores:
             results["metrics"]["score"] = sum(all_scores) / len(all_scores)
+            accuracy = results["metrics"]["score"] * 100
+            print(f"[C-Eval] ✅ Evaluation completed: {results['metrics']['processed']}/{total_items} items processed, Accuracy: {accuracy:.2f}%")
+            print(f"[C-Eval] ⏱️  Performance: Total time: {total_time:.1f}s, Average: {avg_time_per_item:.2f}s/item, Speed: {total_items/total_time:.2f} items/s")
+        else:
+            print(f"[C-Eval] ⚠️ Evaluation completed: {results['metrics']['processed']}/{total_items} items processed, but no scores calculated")
+            print(f"[C-Eval] ⏱️  Performance: Total time: {total_time:.1f}s, Average: {avg_time_per_item:.2f}s/item")
         
         return results
 

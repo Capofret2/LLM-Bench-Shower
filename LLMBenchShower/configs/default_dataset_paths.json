@@ -1,6 +1,6 @@
 {
     "LongBench": "/root/share/datasets/LongBench/data",
-    "LongBenchV2": "/root/share/datasets/LongBenchV2/domains",
+    "LongBenchV2": "/root/longbench/LongBenchv2",
     "MR-GMS8K": "/root/share/datasets/MR-GMS8K",
     "C-Eval": "/root/share/datasets/C-Eval",
     "CMMMU": "/root/share/datasets/CMMMU",

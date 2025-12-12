@@ -34,24 +34,20 @@ class LongBenchV2Benchmarker(BaseBench):
         Returns:
             List[Dict]: The loaded dataset as a list of dictionaries.
         """
-        if subdataset_name == "LongBenchV2":
-            # Return all domain datasets combined
-            all_data = []
-            for domain_name in self.sub_datasets[1:]:  # Skip "LongBenchV2" itself
-                try:
-                    data = self._load_dataset(domain_name)
-                    all_data.extend(data)
-                except:
-                    continue
-            return all_data
-        
-        # 只从测试数据路径加载
         # 从 benchmarker.py 回到项目根目录: backend/bench/longbench_v2 -> backend/bench -> backend -> LLMBenchShower -> 项目根
         test_data_base = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "tests", "test_data")
         
+        # LongBench v2 数据格式：单个 JSON 文件包含所有域的数据
+        # 支持多种路径格式
         local_paths = [
-            # 测试数据路径：tests/test_data/LongBenchV2/{domain}/data.jsonl
+            # 生产数据路径（单个 JSON 文件）：/root/longbench/LongBenchv2/data.json
+            os.path.join(self.dataset_path, "data.json"),
+            # 生产数据路径（备选位置）
+            os.path.join(self.dataset_path, "LongBench", "data.json"),
+            # 测试数据路径（按域分组的 JSONL）：tests/test_data/LongBenchV2/{domain}/data.jsonl
             os.path.join(test_data_base, "LongBenchV2", subdataset_name, "data.jsonl"),
+            # 旧格式：/root/share/datasets/LongBenchV2/domains/{domain}/data.jsonl
+            os.path.join(self.dataset_path, "domains", subdataset_name, "data.jsonl"),
         ]
         
         file_path = None
@@ -70,19 +66,77 @@ class LongBenchV2Benchmarker(BaseBench):
                 error_msg += f"  - {path}\n"
             error_msg += (
                 f"\nSolutions:\n"
-                f"  - Ensure the dataset file exists in one of the above paths\n"
-                f"  - Check that the dataset name '{subdataset_name}' is correct"
+                f"  - Download data.json from https://huggingface.co/datasets/THUDM/LongBench-v2\n"
+                f"  - Place it at: {os.path.join(self.dataset_path, 'data.json')}\n"
+                f"  - Or ensure the dataset file exists in one of the above paths"
             )
             raise FileNotFoundError(error_msg)
         
-        data = []
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    data.append(json.loads(line))
-        
-        print(f"[LongBenchV2] ✅ Loaded {len(data)} items from {file_path}")
-        return data
+        # 根据文件扩展名选择加载方式
+        if file_path.endswith('.json'):
+            # 单个 JSON 文件（包含所有域的数据）
+            with open(file_path, 'r', encoding='utf-8') as f:
+                all_data = json.load(f)
+            
+            # 如果是列表，直接使用；如果是字典，提取列表
+            if isinstance(all_data, dict):
+                # 尝试从字典中提取列表
+                for key, value in all_data.items():
+                    if isinstance(value, list):
+                        all_data = value
+                        break
+                if isinstance(all_data, dict):
+                    # 如果仍然是字典，可能是按域组织的
+                    all_data = []
+                    for key, value in all_data.items():
+                        if isinstance(value, list):
+                            all_data.extend(value)
+            
+            # 如果请求所有域，返回所有数据
+            if subdataset_name == "LongBenchV2":
+                print(f"[LongBenchV2] ✅ Loaded {len(all_data)} items from {file_path}")
+                return all_data
+            
+            # 否则，根据 domain 字段过滤
+            # LongBench v2 使用 domain 字段，需要映射到我们的 subdataset_name
+            domain_mapping = {
+                "Code_Repository_Understanding": ["Code Repository Understanding", "code_repository"],
+                "Long-dialogue_History_Understanding": ["Long-dialogue History Understanding", "long_dialogue", "dialogue"],
+                "Long_In-context_Learning": ["Long In-context Learning", "in_context", "in-context"]
+            }
+            
+            # 获取可能的域名列表
+            possible_domains = [subdataset_name]
+            if subdataset_name in domain_mapping:
+                possible_domains.extend(domain_mapping[subdataset_name])
+            
+            # 过滤数据
+            filtered_data = []
+            for item in all_data:
+                item_domain = item.get("domain", "").lower()
+                item_sub_domain = item.get("sub_domain", "").lower()
+                
+                # 检查是否匹配
+                for domain in possible_domains:
+                    if (domain.lower() in item_domain or 
+                        domain.lower() in item_sub_domain or
+                        item_domain in domain.lower() or
+                        item_sub_domain in domain.lower()):
+                        filtered_data.append(item)
+                        break
+            
+            print(f"[LongBenchV2] ✅ Loaded {len(filtered_data)} items for domain '{subdataset_name}' from {file_path}")
+            return filtered_data
+        else:
+            # JSONL 格式（按域分组的文件）
+            data = []
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        data.append(json.loads(line))
+            
+            print(f"[LongBenchV2] ✅ Loaded {len(data)} items from {file_path}")
+            return data
 
     def _prepare_prompt(self, item: Dict) -> str:
         """Prepare the prompt from a dataset item.

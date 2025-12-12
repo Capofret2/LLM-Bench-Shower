@@ -1,5 +1,6 @@
 import atexit
 import gc
+import time
 import torch
 import threading
 import queue
@@ -46,6 +47,10 @@ class LLMBenchRunner:
 
         self.input_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
         self.output_queue: queue.Queue[BenchResponse] = queue.Queue()
+        
+        # Progress tracking: req_id -> progress info
+        self.progress_tracker: Dict[str, Dict[str, Any]] = {}
+        self.progress_lock = threading.Lock()
 
         self._closed = False
 
@@ -111,22 +116,60 @@ class LLMBenchRunner:
             print(f"[Runner] Model: {model_name}")
             print(f"[Runner] Input queue remaining: {self.input_queue.qsize()}")
 
+            # Initialize progress tracking
+            with self.progress_lock:
+                self.progress_tracker[req_id] = {
+                    "req_id": req_id,
+                    "dataset": dataset_name,
+                    "model": model_name,
+                    "status": "processing",
+                    "current_item": 0,
+                    "total_items": 0,
+                    "current_question": "",
+                    "start_time": time.time(),
+                    "last_update_time": time.time(),
+                    "estimated_completion_time": None
+                }
+
             try:
                 # Process the request (exclude req_id from processing params)
-                result = self._process_single_request(request)
+                result = self._process_single_request(request, req_id=req_id)
                 print(f"[Runner] Request {req_id} completed successfully")
                 print(f"[Runner] Result keys: {list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
+                
+                # Update progress to completed
+                with self.progress_lock:
+                    if req_id in self.progress_tracker:
+                        self.progress_tracker[req_id]["status"] = "completed"
+                        self.progress_tracker[req_id]["current_item"] = self.progress_tracker[req_id]["total_items"]
+                        self.progress_tracker[req_id]["last_update_time"] = time.time()
+                
                 # Put result in output queue
                 response = BenchResponse(req_id=req_id, result=result, error=None)
                 self.output_queue.put(response)
                 print(f"[Runner] Result added to output queue. Output queue size: {self.output_queue.qsize()}")
                 print(f"[Runner] ========== REQUEST COMPLETED ==========")
+                
+                # Clean up progress tracking after a delay (to allow frontend to fetch final status)
+                def cleanup_progress():
+                    time.sleep(5)  # Keep progress for 5 seconds after completion
+                    with self.progress_lock:
+                        self.progress_tracker.pop(req_id, None)
+                threading.Thread(target=cleanup_progress, daemon=True).start()
             except Exception as e:
                 # Put error response in output queue
                 error_msg = f"Error processing request: {str(e)}"
                 print(f"[Runner] Request {req_id} failed with error: {error_msg}")
                 import traceback
                 traceback.print_exc()
+                
+                # Update progress to failed
+                with self.progress_lock:
+                    if req_id in self.progress_tracker:
+                        self.progress_tracker[req_id]["status"] = "failed"
+                        self.progress_tracker[req_id]["error"] = error_msg
+                        self.progress_tracker[req_id]["last_update_time"] = time.time()
+                
                 response = BenchResponse(req_id=req_id, result={}, error=error_msg)
                 self.output_queue.put(response)
                 print(f"[Runner] Error response added to output queue. Output queue size: {self.output_queue.qsize()}")
@@ -134,7 +177,7 @@ class LLMBenchRunner:
             finally:
                 self.input_queue.task_done()
 
-    def _process_single_request(self, request: Dict[str, Any]) -> Dict:
+    def _process_single_request(self, request: Dict[str, Any], req_id: str = None) -> Dict:
         """Process a single benchmark request."""
         model_type: bytes = request.get("model_type", b"local")
         dataset_name = request.get("dataset_name", "unknown")
@@ -143,6 +186,9 @@ class LLMBenchRunner:
         try:
             match model_type:
                 case b"local":
+                    # Store req_id in request for use in eval functions
+                    if req_id:
+                        request["_req_id"] = req_id
                     result = self.eval_local_model_fn(**request)
                     print(f"[Runner] Request completed: dataset={dataset_name}, result_keys={list(result.keys()) if isinstance(result, dict) else 'not_dict'}")
                     return result
@@ -360,6 +406,8 @@ class LLMBenchRunner:
         *args,
         **kwargs,
     ) -> Dict:
+        # Extract req_id from kwargs if available (will be passed to benchmarker)
+        req_id = kwargs.get("_req_id")
         pair = ModelDatasetPair(model_name_or_path, dataset_name)
         print(f"[Runner] eval_local_model_cached: model={model_name_or_path}, dataset={dataset_name}")
         if pair in self.bench_history:
@@ -413,12 +461,36 @@ class LLMBenchRunner:
 
         print(f"[Runner] Calling benchmarker.evaluate_local_llm: supdataset={supdataset_name}, subdataset={subdataset_name}")
         print(f"[Runner] Benchmarker type: {type(benchmarker).__name__}")
+        
+        # Get req_id from kwargs if available
+        req_id = kwargs.get("_req_id")
+        
+        # Create progress update callback if req_id is available
+        def update_progress(current_item, total_items, current_question=""):
+            """Update progress for the current request."""
+            if req_id:
+                with self.progress_lock:
+                    if req_id in self.progress_tracker:
+                        self.progress_tracker[req_id]["current_item"] = current_item
+                        self.progress_tracker[req_id]["total_items"] = total_items
+                        self.progress_tracker[req_id]["current_question"] = current_question
+                        self.progress_tracker[req_id]["last_update_time"] = time.time()
+                        # Log progress
+                        percentage = (current_item / total_items * 100) if total_items > 0 else 0
+                        question_preview = current_question[:50] + "..." if len(current_question) > 50 else current_question
+                        print(f"[Runner] Progress [{req_id[:8]}...]: {current_item}/{total_items} ({percentage:.1f}%) - {question_preview if current_question else 'N/A'}")
+        
+        # Pass progress callback to benchmarker
+        kwargs_with_progress = kwargs.copy()
+        if req_id:
+            kwargs_with_progress["progress_callback"] = update_progress
+        
         benchmark_results = benchmarker.evaluate_local_llm(
             model=model,
             tokenizer=tokenizer,
             subdataset_name=subdataset_name,
             *args,
-            **kwargs,
+            **kwargs_with_progress,
         )
         print(f"[Runner] Benchmarker returned: result_type={type(benchmark_results)}, keys={list(benchmark_results.keys()) if isinstance(benchmark_results, dict) else 'not_dict'}")
         if isinstance(benchmark_results, dict):
@@ -523,6 +595,23 @@ class LLMBenchRunner:
         except queue.Empty:
             pass
         return results
+
+    def get_progress(self, req_ids: List[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Get progress information for one or more requests.
+        
+        Args:
+            req_ids: List of request IDs to get progress for. If None, returns all.
+            
+        Returns:
+            Dictionary mapping req_id to progress information
+        """
+        with self.progress_lock:
+            if req_ids is None:
+                # Return all progress
+                return self.progress_tracker.copy()
+            else:
+                # Return only requested req_ids
+                return {req_id: self.progress_tracker.get(req_id, {}) for req_id in req_ids}
 
     def get_database_stats(self) -> Dict:
         return self.db.get_stats()

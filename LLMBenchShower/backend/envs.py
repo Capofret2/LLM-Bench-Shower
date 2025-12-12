@@ -5,7 +5,9 @@ import torch
 LBS_LOCAL_DEVICE_MAP = os.getenv("LBS_LOCAL_DEVICE_MAP", "auto")
 
 # model loading parameters
-LBS_TORCH_DTYPE = os.getenv("LBS_TORCH_DTYPE", "auto")  # auto, float16, bfloat16, float32
+# Default to float16 for better performance on modern GPUs (RTX 4090 supports both float16 and bfloat16)
+# Use bfloat16 if your model requires it (some models work better with bfloat16)
+LBS_TORCH_DTYPE = os.getenv("LBS_TORCH_DTYPE", "float16")  # auto, float16, bfloat16, float32
 LBS_TRUST_REMOTE_CODE = bool(int(os.getenv("LBS_TRUST_REMOTE_CODE", "0")))  # Set to 1 to enable trust_remote_code
 
 # GPU memory limit (percentage of total GPU memory, 0.0-1.0)

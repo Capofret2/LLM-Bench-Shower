@@ -623,7 +623,7 @@ class ModelCache:
 
         # Load model and tokenizer
         # Import envs to get memory limits
-        from . import envs
+        import envs
         
         model_kwargs = {
             "device_map": self.device_map,
@@ -643,10 +643,53 @@ class ModelCache:
         if envs.LBS_TRUST_REMOTE_CODE:
             model_kwargs["trust_remote_code"] = True
         
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-            **model_kwargs
-        )
+        # Try loading model with error handling for safetensors issues
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                **model_kwargs
+            )
+        except Exception as e:
+            error_msg = str(e)
+            error_type = type(e).__name__
+            # If safetensors error, try loading without safetensors
+            if ("safetensors" in error_msg.lower() or 
+                "header too large" in error_msg.lower() or
+                "SafetensorError" in error_type or
+                "SafetensorException" in error_type):
+                print(f"[ModelCache] Safetensors error detected, trying to load without safetensors: {error_msg}")
+                try:
+                    # Create a copy of model_kwargs to avoid modifying the original
+                    fallback_kwargs = model_kwargs.copy()
+                    
+                    # Try to disable safetensors (parameter name may vary by transformers version)
+                    # Some versions use 'use_safetensors', others may not support it
+                    try:
+                        # First try with use_safetensors=False if supported
+                        fallback_kwargs["use_safetensors"] = False
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_name_or_path,
+                            **fallback_kwargs
+                        )
+                        print(f"[ModelCache] Successfully loaded model using PyTorch format (use_safetensors=False)")
+                    except TypeError:
+                        # If use_safetensors parameter doesn't exist, remove it and try again
+                        # Transformers should automatically fall back to pytorch format
+                        fallback_kwargs.pop("use_safetensors", None)
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_name_or_path,
+                            **fallback_kwargs
+                        )
+                        print(f"[ModelCache] Successfully loaded model (automatic fallback to PyTorch format)")
+                except Exception as e2:
+                    print(f"[ModelCache] Failed to load model even without safetensors: {e2}")
+                    import traceback
+                    traceback.print_exc()
+                    raise e2
+            else:
+                # Re-raise if it's not a safetensors error
+                raise
+        
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
 
         # Save the device_map if it was created by accelerate
